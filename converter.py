@@ -1,80 +1,106 @@
-import pandas as pd
+import pandas  as pd
 import argparse
 import logging
-import os
-from datetime import datetime
+import sys
+from pathlib import Path
 
-# ─── Logging Setup ────────────────────────────────────────────
+# ── Logging setup ──────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s"
 )
+logger = logging.getLogger(__name__)
 
-def clean_data(df, date_columns=None, rename_map=None):
-    """Clean and normalize the DataFrame."""
+# ── Column rename map (customize as needed) ────────────────────
+COLUMN_RENAMES = {
+    "name":      "Full Name",
+    "age":       "Age",
+    "join_date": "Join Date",
+    "salary":    "Salary (USD)",
+}
 
-    # 1. Fill missing values
-    df.fillna("N/A", inplace=True)
-    logging.info("Filled missing values with 'N/A'")
+def read_csv(input_path: str) -> pd.DataFrame:
+    """Read CSV file with error handling."""
+    path = Path(input_path)
+    if not path.exists():
+        logger.error(f"File not found: {input_path}")
+        sys.exit(1)
+    if path.suffix.lower() != ".csv":
+        logger.error(f"Not a CSV file: {input_path}")
+        sys.exit(1)
 
-    # 2. Parse date columns if provided
-    if date_columns:
-        for col in date_columns:
-            if col in df.columns:
-                df[col] = pd.to_datetime(df[col], errors='coerce')
-                logging.info(f"Parsed dates in column: {col}")
+    logger.info(f"Reading file: {input_path}")
+    df = pd.read_csv(input_path)
+    logger.info(f"Loaded {len(df)} rows, {len(df.columns)} columns")
+    return df
 
-    # 3. Rename columns if mapping provided
+def clean_data(df: pd.DataFrame) -> pd.DataFrame:
+    """Clean and normalize the dataframe."""
+
+    # 1. Drop fully empty rows
+    before = len(df)
+    df.dropna(how="all", inplace=True)
+    logger.info(f"Removed {before - len(df)} fully empty rows")
+
+    # 2. Fill missing numeric values with column median
+    for col in df.select_dtypes(include="number").columns:
+        missing = df[col].isna().sum()
+        if missing:
+            median_val = df[col].median()
+            df[col].fillna(median_val, inplace=True)
+            logger.info(f"Filled {missing} missing values in '{col}' with median ({median_val})")
+
+    # 3. Fill missing text values with "Unknown"
+    for col in df.select_dtypes(include="object").columns:
+        missing = df[col].isna().sum()
+        if missing:
+            df[col].fillna("Unknown", inplace=True)
+            logger.info(f"Filled {missing} missing values in '{col}' with 'Unknown'")
+
+    # 4. Parse date columns
+    for col in df.columns:
+        if "date" in col.lower():
+            original = df[col].copy()
+            df[col] = pd.to_datetime(df[col], errors="coerce")
+            bad = df[col].isna().sum()
+            if bad:
+                logger.warning(f"Could not parse {bad} date(s) in '{col}' — set to NaT")
+
+    # 5. Rename columns
+    rename_map = {k: v for k, v in COLUMN_RENAMES.items() if k in df.columns}
     if rename_map:
         df.rename(columns=rename_map, inplace=True)
-        logging.info(f"Renamed columns: {rename_map}")
+        logger.info(f"Renamed columns: {rename_map}")
 
     return df
 
-def csv_to_excel(input_file, output_path=None):
-    """Main conversion function."""
+def export_to_excel(df: pd.DataFrame, output_path: str) -> None:
+    """Export dataframe to a formatted .xlsx file."""
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Validate input file
-    if not os.path.exists(input_file):
-        logging.error(f"File not found: {input_file}")
-        raise FileNotFoundError(f"No such file: {input_file}")
+    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Data")
 
-    if not input_file.endswith(".csv"):
-        logging.error("Input file must be a .csv file")
-        raise ValueError("Only .csv files are supported")
+        # Auto-fit column widths
+        ws = writer.sheets["Data"]
+        for col in ws.columns:
+            max_len = max(len(str(cell.value or "")) for cell in col)
+            ws.column_dimensions[col[0].column_letter].width = max_len + 4
 
-    # Read CSV
-    logging.info(f"Reading CSV: {input_file}")
-    df = pd.read_csv(input_file)
+    logger.info(f"✅ Saved Excel file: {output_path}")
 
-    # Clean data
-    df = clean_data(df)
-
-    # Set output path
-    if not output_path:
-        base = os.path.splitext(input_file)[0]
-        output_path = f"{base}_converted.xlsx"
-
-    # Export to Excel
-    df.to_excel(output_path, index=False, engine='openpyxl')
-    logging.info(f"✅ Saved Excel file to: {output_path}")
-    print(f"\n✅ Done! Excel file saved at: {output_path}")
-
-# ─── CLI ──────────────────────────────────────────────────────
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser(
-        description="Convert CSV to Excel (.xlsx)"
+        description="Convert a CSV file to a cleaned Excel (.xlsx) file"
     )
-    parser.add_argument(
-        "--input", "-i",
-        required=True,
-        help="Path to input CSV file"
-    )
-    parser.add_argument(
-        "--output", "-o",
-        default=None,
-        help="Path for output .xlsx file (optional)"
-    )
+    parser.add_argument("--input",  "-i", required=True, help="Path to input CSV file")
+    parser.add_argument("--output", "-o", default="output.xlsx", help="Path for output .xlsx file")
     args = parser.parse_args()
 
-    csv_to_excel(args.input, args.output)
+    df = read_csv(args.input)
+    df = clean_data(df)
+    export_to_excel(df, args.output)
+
+if __name__ == "__main__":
+    main()
